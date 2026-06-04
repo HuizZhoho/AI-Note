@@ -973,3 +973,317 @@ echo.c 通过 TCP 回调实现应用逻辑；
 主循环不断处理收包、定时器和应用任务。
 ```
 
+## 18. 通俗理解版框架
+
+可以把整个以太网案例想成一个快递系统。
+
+```text
+PC
+    相当于寄件人或收件人。
+
+网线 / RJ45
+    相当于道路。
+
+PHY
+    相当于快递站门口的装卸工。
+    它负责把网线上的电信号转换成芯片能理解的数据，也负责判断路通不通。
+
+GEM
+    相当于 ZYNQ 内部的快递分拣中心。
+    它知道以太网帧怎么收、怎么发、MAC 地址怎么匹配。
+
+DMA / DDR
+    相当于仓库和搬运车。
+    数据包来了以后，不靠 CPU 一点点搬，而是 DMA 直接搬到 DDR。
+
+lwIP
+    相当于规则管理员。
+    它知道 ARP、IP、ICMP、TCP、UDP 这些网络协议该怎么处理。
+
+echo.c
+    相当于具体业务员。
+    TCP echo 的业务很简单：收到什么，就原样返回什么。
+```
+
+所以学习时不要一上来就陷入驱动细节，先抓住这条主线：
+
+```text
+PHY 让线通
+GEM 让帧能收发
+DMA 把包搬到内存
+lwIP 看懂协议
+应用代码处理业务
+```
+
+## 19. 从零建立工程步骤
+
+下面按实际做工程的顺序说明。
+
+### 19.1 Vivado 硬件工程
+
+第一步，创建 Vivado 工程。
+
+```text
+Create Project
+选择器件或开发板
+创建 Block Design
+添加 ZYNQ7 Processing System
+```
+
+第二步，配置 ZYNQ PS。
+
+```text
+Run Block Automation
+打开 ZYNQ7 Processing System 配置界面
+确认 DDR 配置正确
+打开 UART
+打开 Ethernet GEM0 或 GEM1
+打开 MDIO
+确认 MIO 或 EMIO 选择和原理图一致
+```
+
+这里最关键的是看板级原理图：
+
+```text
+PHY 接在 GEM0 还是 GEM1
+PHY 数据线走 MIO 还是 EMIO
+PHY 地址是多少
+PHY reset 由谁控制
+PHY 需要什么参考时钟
+```
+
+第三步，检查 MIO/EMIO。
+
+```text
+如果 PHY 直接接 PS MIO：
+    Vivado 中配置 GEM 使用 MIO。
+
+如果 PHY 经过 PL 管脚：
+    Vivado 中配置 GEM 使用 EMIO。
+    还需要在 XDC 中约束 RGMII/RMII/MDIO/reset 等管脚。
+```
+
+第四步，生成硬件。
+
+```text
+Validate Design
+Generate Output Products
+Create HDL Wrapper
+Generate Bitstream
+Export Hardware，勾选 Include Bitstream
+得到 .xsa 文件
+```
+
+`.xsa` 的作用：
+
+```text
+告诉 Vitis：
+有哪些硬件外设
+外设基地址是多少
+中断号是多少
+DDR 地址范围是多少
+GEM 使用哪个实例
+```
+
+### 19.2 Vitis 软件工程
+
+第一步，创建 Platform。
+
+```text
+New Platform Project
+选择 Vivado 导出的 .xsa
+生成 standalone BSP
+```
+
+第二步，检查 BSP。
+
+```text
+确认操作系统是 standalone
+确认 CPU 是 ps7_cortexa9_0
+确认 lwIP 库已启用
+确认 stdin/stdout 使用正确 UART
+```
+
+第三步，创建应用。
+
+```text
+New Application Project
+选择刚才的平台
+模板选择 lwIP Echo Server
+生成 main.c、echo.c、platform.c、xemacif 相关文件
+```
+
+第四步，配置 lwIP。
+
+常见配置方向：
+
+```text
+静态 IP：
+    关闭 DHCP，手动配置 IP。
+
+动态 IP：
+    打开 DHCP，等待路由器分配地址。
+
+裸机 RAW API：
+    适合资源少、流程清晰的入门案例。
+```
+
+第五步，编译运行。
+
+```text
+Build Project
+连接 JTAG
+Program FPGA
+Run Application
+打开串口终端
+观察 IP、link、server started 等打印
+```
+
+### 19.3 PC 端测试
+
+PC 设置同网段 IP：
+
+```text
+ZYNQ IP: 192.168.1.10
+PC IP:   192.168.1.100
+Mask:    255.255.255.0
+```
+
+测试 ping：
+
+```powershell
+ping 192.168.1.10
+```
+
+测试 TCP echo：
+
+```powershell
+telnet 192.168.1.10 7
+```
+
+或使用网络调试助手连接：
+
+```text
+协议：TCP Client
+目标 IP：192.168.1.10
+目标端口：7
+```
+
+## 20. 带注释代码阅读路径
+
+本目录提供了两个注释版代码文件：
+
+```text
+code/main_annotated.c
+code/echo_annotated.c
+```
+
+阅读顺序建议：
+
+```text
+先读 main_annotated.c
+    目标：理解整个程序怎么启动。
+
+再读 echo_annotated.c
+    目标：理解 TCP 服务端怎么建立、怎么收包、怎么回包。
+
+最后回到 Xilinx 原始工程
+    对照真实 main.c、echo.c、xemacif.c、xemacpsif.c。
+```
+
+`main_annotated.c` 重点看这些函数：
+
+```text
+init_platform()
+    准备串口、cache、timer、中断等基础环境。
+
+lwip_init()
+    初始化 TCP/IP 协议栈。
+
+xemac_add()
+    把 ZYNQ GEM 网卡注册进 lwIP。
+
+netif_set_default()
+    设置默认网卡。
+
+netif_set_up()
+    启动 lwIP 网络接口。
+
+start_application()
+    启动 TCP echo 应用。
+
+xemacif_input()
+    持续从 GEM/DMA 收包，并交给 lwIP。
+```
+
+`echo_annotated.c` 重点看这些函数：
+
+```text
+tcp_new_ip_type()
+    创建 TCP 控制块。
+
+tcp_bind()
+    绑定 TCP 服务端端口。
+
+tcp_listen()
+    进入监听状态。
+
+tcp_accept()
+    注册新连接回调。
+
+tcp_recv()
+    注册数据接收回调。
+
+tcp_recved()
+    告诉 lwIP 已处理收到的数据。
+
+tcp_write()
+    把收到的数据写回发送缓冲区。
+
+tcp_output()
+    推动待发送数据尽快发出。
+
+pbuf_free()
+    释放接收缓冲区，避免内存池耗尽。
+```
+
+## 21. 把整个案例串起来
+
+完整理解时，可以按下面这条线记忆：
+
+```text
+Vivado 中打开 GEM
+    |
+导出 XSA
+    |
+Vitis BSP 生成 xemacps 驱动和 lwIP 支持
+    |
+main.c 调用 init_platform()
+    |
+main.c 设置 IP / MAC
+    |
+main.c 调用 lwip_init()
+    |
+main.c 调用 xemac_add()
+    |
+xemac_add() 初始化 GEM、PHY、DMA、netif
+    |
+main.c 调用 start_application()
+    |
+echo.c 创建 TCP 监听服务
+    |
+PC 连接 ZYNQ
+    |
+lwIP 调用 accept_callback()
+    |
+PC 发送 TCP 数据
+    |
+lwIP 调用 recv_callback()
+    |
+recv_callback() 调用 tcp_write()
+    |
+ZYNQ 原样返回数据
+```
+
+这就是从工程建立到程序运行，再到网络数据真正收发的完整闭环。
+
