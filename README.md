@@ -1,3 +1,9 @@
+# AI-Note
+
+From Codex
+
+---
+
 # ZYNQ7010 以太网案例 Flow 与代码详解
 
 本文以常见的 ZYNQ7010 裸机 lwIP Echo Server 案例为主线，完整说明从 Vivado 硬件配置、Vitis BSP 生成、lwIP 初始化、GEM/PHY 驱动，到 TCP echo 应用运行的整体过程。
