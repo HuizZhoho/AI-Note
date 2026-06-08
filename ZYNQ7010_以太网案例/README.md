@@ -2,6 +2,24 @@
 
 本文以常见的 ZYNQ7010 裸机 lwIP Echo Server 案例为主线，完整说明从 Vivado 硬件配置、Vitis BSP 生成、lwIP 初始化、GEM/PHY 驱动，到 TCP echo 应用运行的整体过程。
 
+## 推荐阅读顺序
+
+```text
+1. 先读本文，理解整体工程 flow 和代码主线
+2. 再读 通信协议完整讲解.md，理解协议、电气特性和完整通信交互过程
+3. 再读 code/main_annotated.c，理解 main() 如何串起平台、lwIP、网卡和应用
+4. 再读 code/echo_annotated.c，理解 TCP Echo Server 的回调逻辑
+5. 最后按调试检查表验证 PHY、ARP、ping、TCP echo
+```
+
+相关文档：
+
+```text
+通信协议完整讲解.md
+code/main_annotated.c
+code/echo_annotated.c
+```
+
 ## 1. 整体框架
 
 ZYNQ7010 以太网案例可以分成五层：
