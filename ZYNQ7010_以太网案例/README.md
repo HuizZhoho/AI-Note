@@ -9,9 +9,10 @@
 2. 再读 通信协议完整讲解.md，理解协议、电气特性和完整通信交互过程
 3. 再读 以太网通信协议扩展详解.md，理解 VLAN、UDP、TCP、DHCP、DNS、PTP、Modbus TCP 等扩展协议
 4. 再读 ZYNQ_PL_PS以太网实现方案与代码级解析.md，理解 PS GEM、EMIO、PL AXI Ethernet、自定义 PL UDP 等实现路线
-5. 再读 code/main_annotated.c，理解 main() 如何串起平台、lwIP、网卡和应用
-6. 再读 code/echo_annotated.c，理解 TCP Echo Server 的回调逻辑
-7. 最后按调试检查表验证 PHY、ARP、ping、TCP echo
+5. 再读 ../以太网芯片软硬件学习指南/README.md，补齐 PHY、Switch、NIC 芯片软硬件视角
+6. 再读 code/main_annotated.c，理解 main() 如何串起平台、lwIP、网卡和应用
+7. 再读 code/echo_annotated.c，理解 TCP Echo Server 的回调逻辑
+8. 最后按调试检查表验证 PHY、ARP、ping、TCP echo
 ```
 
 相关文档：
@@ -20,6 +21,7 @@
 通信协议完整讲解.md
 以太网通信协议扩展详解.md
 ZYNQ_PL_PS以太网实现方案与代码级解析.md
+../以太网芯片软硬件学习指南/README.md
 code/main_annotated.c
 code/echo_annotated.c
 ```

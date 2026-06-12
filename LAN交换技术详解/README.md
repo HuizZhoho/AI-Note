@@ -105,6 +105,7 @@ Trunk/Access 端口发出
 
 - [TCP/IP + IPv6 协议详解](../TCP_IP协议详解/README.md)
 - [ZYNQ7010 以太网案例通信协议与电气特性完整讲解](../ZYNQ7010_以太网案例/通信协议完整讲解.md)
+- [以太网 PHY / Switch / NIC 芯片软硬件学习指南](../以太网芯片软硬件学习指南/README.md)
 
 ## 版权说明
 

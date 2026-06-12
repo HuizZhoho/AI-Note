@@ -87,6 +87,7 @@ Firmware 控制和管理
 - [TCP/IP + IPv6 协议详解](../TCP_IP协议详解/README.md)
 - [LAN 交换技术详解](../LAN交换技术详解/README.md)
 - [ZYNQ7010 以太网案例](../ZYNQ7010_以太网案例/README.md)
+- [以太网 PHY / Switch / NIC 芯片软硬件学习指南](../以太网芯片软硬件学习指南/README.md)
 
 ## 一句话总览
 
