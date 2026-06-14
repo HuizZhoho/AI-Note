@@ -43,6 +43,8 @@ Linux phylib / phylink 路径
   ->
 两个实际千兆案例
   ->
+实际工程软硬件架构和代码级流程分析
+  ->
 常见故障与证据链
 ```
 
@@ -886,7 +888,563 @@ Switch ASIC
 | 开机偶发收不到端口流量 | fixed-link / in-band 状态机 | 两端启动顺序和模式不一致 |
 | ethtool 看 CPU MAC 正常，但交换统计没涨 | switch 端口使能、CPU Port mode | switch 内部未真正启用该端口 |
 
-## 9. 一张总排障表
+## 9. 实际工程软硬件架构
+
+### 9.1 单板硬件架构
+
+一个可落地的 SGMII 千兆工程，硬件不要只画 `SGMII_TX/RX` 四根线。更完整的框图应该是：
+
+```text
+电源树
+  |
+  |-- SoC/FPGA Core / IO / SerDes AVCC
+  |-- PHY Core / Analog / PLL / IO
+  |-- Switch Core / SerDes / IO
+
+时钟树
+  |
+  |-- SoC/FPGA 主时钟
+  |-- SerDes REFCLK
+  |-- PHY/Switch 参考时钟
+
+控制信号
+  |
+  |-- RESET_N
+  |-- INT_N
+  |-- strap 电阻
+
+管理总线
+  |
+  |-- MDIO/MDC 到 PHY
+  |-- SPI/I2C/MDIO/MMIO 到 Switch
+
+数据通道
+  |
+  |-- SGMII TXP/TXN
+  |-- SGMII RXP/RXN
+  |-- RJ45 / SFP / Switch user ports
+```
+
+原理图评审时按这个顺序看：
+
+```text
+1. 电源轨是否全，尤其是 SerDes/PLL 模拟电源。
+2. 参考时钟频率、方向、抖动规格是否符合两端要求。
+3. reset 释放顺序是否保证时钟和电源已经稳定。
+4. strap 默认模式是否就是目标模式。
+5. MDIO/SPI/I2C 管理通道是否能访问到目标芯片。
+6. SGMII 差分对是否阻抗、极性、AC 耦合和长度控制正确。
+7. RJ45/SFP/Switch user port 侧是否也满足各自物理层要求。
+```
+
+板级调试不要跳过电源和时钟。SGMII 的软件现象经常表现为 `link down`，但根因可能是 SerDes 参考时钟没有起、PLL 电源噪声大、reset 太早释放。
+
+### 9.2 软件架构
+
+实际项目里，SGMII 相关软件通常分四层：
+
+```text
+应用层
+  |
+  |-- ping / iperf / TCP server / Web / 业务协议
+
+协议栈与网络设备层
+  |
+  |-- lwIP netif
+  |-- Linux netdev / DSA / bridge / VLAN
+
+MAC / DMA 驱动层
+  |
+  |-- MAC 寄存器
+  |-- DMA descriptor
+  |-- cache flush / invalidate
+  |-- 中断 / NAPI / 轮询
+
+链路与物理层管理
+  |
+  |-- PCS / SerDes
+  |-- PHY driver / phylib
+  |-- phylink
+  |-- MDIO / Switch SDK
+```
+
+判断代码应该改哪里时，先按问题现象定位层级：
+
+| 现象 | 通常改哪里 |
+| --- | --- |
+| PHY ID 读不到 | reset、MDIO 驱动、PHY 地址、GPIO 时序 |
+| PCS 不 lock | SerDes/PCS 初始化、参考时钟、接口模式 |
+| link up 但 MAC 无包 | phylink、MAC link_up、fixed/in-band 配置 |
+| MAC 有包但 lwIP/Linux 无包 | DMA、descriptor、cache、中断/NAPI |
+| Linux 有包但 VLAN 不通 | bridge、DSA、PVID、tag/untag、CPU tag |
+
+### 9.3 工程目录建议
+
+裸机或 SDK 工程可以按功能拆文件：
+
+```text
+board.c
+    电源、reset、GPIO、时钟相关板级初始化。
+
+mdio.c
+    MDIO 读写、PHY 地址扫描、PHY ID 读取。
+
+phy_sgmii.c
+    PHY 模式、auto-negotiation、link 状态读取。
+
+pcs_serdes.c
+    PCS/SerDes 模式、PLL lock、in-band status。
+
+mac_dma.c
+    MAC 收发、DMA descriptor、cache 处理。
+
+net_app.c
+    ping/echo/UDP/TCP 业务测试。
+```
+
+Linux 工程里则通常落在这些位置：
+
+```text
+device tree：
+    描述 phy-mode、phy-handle、fixed-link、managed、MDIO 节点。
+
+MAC driver：
+    配置 MAC/PCS，响应 phylink 回调，打开或关闭收发。
+
+PHY driver：
+    通过 MDIO 读取状态，配置 PHY 厂商寄存器。
+
+Switch driver / DSA：
+    配置端口、CPU tag、VLAN、FDB、trap、统计计数。
+```
+
+## 10. 代码级详细流程分析
+
+这一节用“能迁移到真实工程”的方式看代码。代码不是某个厂商 SDK 的原样实现，而是把真实工程里的职责拆出来。
+
+### 10.1 上电初始化入口
+
+```c
+int board_network_init(void)
+{
+    board_power_check();
+    board_clock_enable();
+    board_reset_sequence();
+
+    if (mdio_bus_init() != 0) {
+        return -1;
+    }
+
+    if (sgmii_port_init() != 0) {
+        return -1;
+    }
+
+    if (mac_dma_init() != 0) {
+        return -1;
+    }
+
+    return net_stack_init();
+}
+```
+
+逐段看：
+
+```text
+board_power_check()
+    不一定真的由软件测电源，但 bring-up 日志里应该确认电源和 reset 状态。
+
+board_clock_enable()
+    保证 SerDes REFCLK、PHY/Switch 时钟已经稳定。
+
+board_reset_sequence()
+    reset 释放不能早于时钟稳定，否则 strap 采样和 PLL 初始化可能出错。
+
+mdio_bus_init()
+    没有管理通道，后面的 PHY 状态都没有证据。
+
+sgmii_port_init()
+    建立 MAC-PCS-SerDes-PHY/Switch 之间的链路。
+
+mac_dma_init()
+    链路起来后，还要准备 descriptor、buffer 和中断。
+
+net_stack_init()
+    最后才是 lwIP 或 Linux 网络栈进入工作。
+```
+
+### 10.2 MDIO 扫描与 PHY ID
+
+```c
+static int mdio_find_phy(void)
+{
+    for (int addr = 0; addr < 32; addr++) {
+        uint16_t id1 = mdio_read(addr, 0x02);
+        uint16_t id2 = mdio_read(addr, 0x03);
+
+        if (id1 == 0xffff || id1 == 0x0000) {
+            continue;
+        }
+
+        log_info("phy addr=%d id=%04x:%04x", addr, id1, id2);
+        return addr;
+    }
+
+    return -1;
+}
+```
+
+这段代码解决的问题：
+
+```text
+确认 MDIO/MDC 电气和时序是通的。
+确认 PHY 地址没有和 strap 预期冲突。
+确认软件后续写寄存器不会写到错误地址。
+```
+
+常见误判：
+
+```text
+读到 0xffff：
+    经常是 MDIO 上拉、PHY 未释放 reset、地址不存在。
+
+读到 0x0000：
+    经常是总线被拉低、PHY 电源异常、MDC/MDIO 连接错误。
+
+读到一个 ID：
+    只说明管理通道通，不说明 SGMII 或铜口已经通。
+```
+
+### 10.3 SGMII PHY 初始化
+
+```c
+static int phy_config_for_sgmii(int phy_addr)
+{
+    phy_soft_reset(phy_addr);
+    phy_wait_reset_done(phy_addr);
+
+    phy_select_page(phy_addr, PHY_VENDOR_PAGE);
+    phy_write(phy_addr, PHY_MAC_IF_REG, PHY_MAC_IF_SGMII);
+    phy_write(phy_addr, PHY_SGMII_CTRL_REG, PHY_SGMII_AN_ENABLE);
+    phy_select_page(phy_addr, PHY_STANDARD_PAGE);
+
+    phy_restart_autoneg(phy_addr);
+    return 0;
+}
+```
+
+逐段看：
+
+```text
+phy_soft_reset()
+    把 PHY 拉回已知状态，避免 bootloader 或 strap 留下不可控配置。
+
+phy_select_page()
+    很多 PHY 的 SGMII 模式寄存器在厂商扩展页，不在标准 0x00~0x1f。
+
+PHY_MAC_IF_SGMII
+    明确告诉 PHY：MAC 侧不是 RGMII，也不是 1000BASE-X。
+
+PHY_SGMII_AN_ENABLE
+    决定 PHY 是否通过 SGMII control word 向 MAC 传递状态。
+
+phy_restart_autoneg()
+    重新启动铜口侧协商，让 link/speed/duplex 状态重新生成。
+```
+
+真实项目要注意：
+
+```text
+寄存器名和页号必须以具体 PHY datasheet 为准。
+不要把 RGMII delay、LED、EEE、低功耗配置照搬到 SGMII 项目里。
+```
+
+### 10.4 PCS/SerDes 初始化
+
+```c
+static int pcs_serdes_config(int port, bool inband)
+{
+    serdes_power_on(port);
+    serdes_set_refclk(port, REFCLK_125M);
+    serdes_set_line_rate(port, LINE_RATE_1G25);
+    serdes_set_polarity(port, NORMAL_POLARITY);
+
+    if (!serdes_wait_pll_lock(port, 100)) {
+        return -1;
+    }
+
+    pcs_set_protocol(port, PCS_PROTO_SGMII);
+    pcs_enable_autoneg(port, inband);
+    pcs_restart(port);
+
+    return pcs_wait_link_timer(port, 1000);
+}
+```
+
+逐段看：
+
+```text
+serdes_power_on()
+    SerDes 常有独立电源域或电源门控。
+
+serdes_set_refclk()
+    频率不对时，后面所有 PCS 状态都不可信。
+
+serdes_set_line_rate()
+    SGMII 常见是 1.25 Gbaud，不是 125 MHz 低速并行线。
+
+serdes_set_polarity()
+    某些板子 TX/RX 极性接反后，可以由 SerDes 寄存器修正。
+
+serdes_wait_pll_lock()
+    这是电气层证据，但不是协议层 link。
+
+pcs_set_protocol()
+    明确 PCS 语义是 SGMII，不是 1000BASE-X。
+
+pcs_enable_autoneg()
+    对应 in-band status 是否启用。
+```
+
+调试时建议打印这些状态：
+
+```text
+SerDes PLL lock
+RX signal detect
+PCS block lock / code group sync
+SGMII autoneg complete
+resolved speed / duplex
+```
+
+### 10.5 MAC link_up 处理
+
+```c
+static void mac_link_up(int port, int speed, bool full_duplex)
+{
+    mac_disable_rx_tx(port);
+
+    mac_set_speed(port, speed);
+    mac_set_duplex(port, full_duplex);
+    mac_clear_stats(port);
+
+    mac_enable_rx_tx(port);
+}
+```
+
+为什么要这样写：
+
+```text
+先关 RX/TX：
+    避免改速率和双工时收发状态机处于不一致状态。
+
+设置 speed/duplex：
+    MAC 必须知道当前速率，否则 inter-packet gap、流控和时钟域处理可能错误。
+
+清统计可选：
+    bring-up 阶段清一次，后面看到的错误计数更干净。
+
+最后开 RX/TX：
+    链路参数稳定后再放行数据。
+```
+
+如果使用 Linux phylink，这类动作通常在 MAC 驱动回调里：
+
+```c
+static void mymac_mac_link_up(struct phylink_config *config,
+                              struct phy_device *phy,
+                              unsigned int mode,
+                              phy_interface_t interface,
+                              int speed,
+                              int duplex,
+                              bool tx_pause,
+                              bool rx_pause)
+{
+    struct mymac *priv = container_of(config, struct mymac, phylink_config);
+
+    mymac_stop(priv);
+    mymac_set_interface(priv, interface);
+    mymac_set_speed(priv, speed);
+    mymac_set_duplex(priv, duplex);
+    mymac_set_pause(priv, tx_pause, rx_pause);
+    mymac_start(priv);
+}
+```
+
+这段代码要读懂的是：
+
+```text
+interface：
+    告诉 MAC 当前是 SGMII、RGMII、1000BASE-X 等哪种接口。
+
+speed/duplex：
+    可能来自 PHY、fixed-link 或 in-band status。
+
+tx_pause/rx_pause：
+    来自协商结果，影响 MAC pause frame 行为。
+```
+
+### 10.6 DMA 收包路径
+
+```c
+static int mac_rx_poll(void)
+{
+    struct dma_desc *desc = rx_ring_get_completed();
+    if (!desc) {
+        return 0;
+    }
+
+    cache_invalidate(desc->buf, desc->len);
+
+    if (desc->status & DMA_RX_ERR) {
+        mac_stat.rx_error++;
+        rx_ring_recycle(desc);
+        return -1;
+    }
+
+    netif_receive(desc->buf, desc->len);
+    rx_ring_recycle(desc);
+    return 1;
+}
+```
+
+逐段看：
+
+```text
+rx_ring_get_completed()
+    DMA 硬件已经把一帧写进内存，descriptor 状态归还给 CPU。
+
+cache_invalidate()
+    裸机和很多 SoC 场景必须做，否则 CPU 可能读到旧缓存。
+
+DMA_RX_ERR
+    如果这里错误增加，要看 MAC FCS、长度错误、FIFO overflow 等统计。
+
+netif_receive()
+    到这一步才进入 lwIP 或 Linux 网络栈。
+
+rx_ring_recycle()
+    descriptor 必须及时还给硬件，否则很快收包耗尽。
+```
+
+学习时可以按这个顺序打点：
+
+```text
+MAC RX frame counter
+  ->
+DMA completed descriptor
+  ->
+cache invalidate 后的 Ethernet header
+  ->
+ARP/IP 协议栈入口
+```
+
+### 10.7 Switch CPU Port 与 DSA 的代码关系
+
+Switch 场景下，驱动初始化常见主线是：
+
+```c
+static int switch_setup(void)
+{
+    sw_read_chip_id();
+    sw_reset_pipeline();
+    sw_init_serdes();
+
+    sw_port_set_mode(CPU_PORT, PORT_MODE_SGMII);
+    sw_port_set_fixed_link(CPU_PORT, 1000, true);
+    sw_cpu_tag_enable(CPU_PORT, true);
+
+    sw_vlan_init_default();
+    sw_trap_control_frames();
+    sw_enable_learning();
+    sw_enable_ports();
+
+    return 0;
+}
+```
+
+逐段看：
+
+```text
+sw_init_serdes()
+    解决 CPU MAC 到 Switch CPU Port 的 SGMII 通道。
+
+sw_port_set_fixed_link()
+    固定 CPU Port 千兆全双工，避免等待不存在的外部 PHY。
+
+sw_cpu_tag_enable()
+    DSA 或厂商 tag 用来告诉 CPU：包来自哪个 user port，要发到哪个 user port。
+
+sw_vlan_init_default()
+    没有 VLAN/PVID，很多包会被交换芯片直接丢掉。
+
+sw_trap_control_frames()
+    STP、LLDP、LACP、管理 ARP 等控制帧必须按策略送 CPU。
+```
+
+对应 Linux 命令验证：
+
+```bash
+ip link set eth0 up
+ip link set lan0 up
+ip link set lan1 up
+bridge link
+bridge vlan show
+bridge fdb show
+ethtool -S lan0
+ethtool -S eth0
+```
+
+判断依据：
+
+```text
+eth0 统计增长：
+    CPU Port 和 conduit MAC 有数据。
+
+lan0/lan1 统计增长：
+    user port 有真实流量。
+
+bridge fdb 有学习项：
+    二层学习路径通。
+
+tcpdump 在 eth0 能看到 DSA tag：
+    CPU tag 路径通，但普通用户抓 lan0 时通常不直接看 tag。
+```
+
+### 10.8 推荐逐步学习路线
+
+按下面 6 步学，最稳：
+
+```text
+第 1 步：只读 ID
+    写 mdio_read()，读 PHY ID 或 switch chip ID。
+
+第 2 步：只看 SerDes
+    配 PCS/SerDes，确认 PLL lock、PCS lock。
+
+第 3 步：只看 link
+    铜口 PHY 看 link/speed/duplex；Switch CPU Port 看 fixed/in-band 状态。
+
+第 4 步：只看 MAC 计数
+    先不管协议，确认 RX/TX frame counter 增长。
+
+第 5 步：只看二层
+    抓 ARP、看 FDB、看 VLAN、看 CPU tag。
+
+第 6 步：再看三四层
+    ping、TCP echo、iperf、业务协议。
+```
+
+每一步都要有退出条件：
+
+| 步骤 | 通过标准 |
+| --- | --- |
+| 读 ID | ID 稳定，不是 0xffff/0x0000 |
+| SerDes | PLL lock、PCS 同步稳定 |
+| Link | link up，speed/duplex 与预期一致 |
+| MAC | RX/TX 计数增长，无持续 FCS/CRC 错误 |
+| 二层 | ARP、FDB、VLAN 行为符合设计 |
+| 协议 | ping、TCP/UDP、iperf 或业务测试通过 |
+
+## 11. 一张总排障表
 
 | 现象 | 证据 | 优先定位层 |
 | --- | --- | --- |
@@ -915,7 +1473,7 @@ MAC 计数
 
 不要一上来就抓 TCP。
 
-## 10. 本章总结
+## 12. 本章总结
 
 把 SGMII 讲透，关键不是记住多少缩写，而是把责任边界分清：
 
