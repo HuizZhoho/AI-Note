@@ -28,7 +28,10 @@ NIC 网卡芯片：把主机内存中的数据通过 DMA、队列和 MAC/PHY 发
 5. 05_调试排障与学习路线.md
    按“硬件电气 -> PHY link -> MAC 帧 -> 协议 -> 应用”的顺序建立系统排查方法。
 
-6. 术语表.md
+6. 09_SGMII接口详解与千兆案例分析.md
+   单独讲透 SGMII 的 PCS/SerDes、in-band status、Linux phylink，以及“MAC 直连 PHY”和“CPU Port 连 Switch”两个千兆案例。
+
+7. 术语表.md
    复习中英术语。
 ```
 
@@ -78,6 +81,19 @@ FPGA 10GbE UDP 数据采集
 - [TCP_IP协议详解](../TCP_IP协议详解/README.md)：ARP、IPv4/IPv6、ICMP、UDP、TCP、DNS、HTTP 等协议主线。
 - [LAN交换技术详解](../LAN交换技术详解/README.md)：透明桥、VLAN、STP、LACP、QoS、交换芯片内部实现。
 - [万兆以太网_FPGA实现详解](../万兆以太网_FPGA实现详解/README.md)：10GbE、SFP+、GT、PCS/PMA、MAC、AXI-Stream、DMA 和 Firmware。
+
+补充阅读关系：
+
+```text
+01_PHY芯片硬件与驱动详解.md：
+    重点在 PHY 供电、reset、MDIO、strap 和常见 MAC-PHY 接口。
+
+09_SGMII接口详解与千兆案例分析.md：
+    把 SGMII 这条串行接口单独拆开，补齐 PCS / SerDes / in-band status / phylink 视角。
+
+08_案例二_嵌入式Linux_Switch芯片网关项目.md：
+    继续往下落到 Switch CPU Port、DSA、VLAN、trap 和 Linux 网关项目。
+```
 
 ## 一张总图
 
